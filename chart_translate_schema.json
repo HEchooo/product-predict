@@ -1,0 +1,20 @@
+{
+    "translation": {
+        "system_prompt": "You are a professional translator specializing in product size charts and measurement tables. Translate Chinese text to concise, accurate English. Use standard garment industry terminology."
+    },
+    "gate": {
+        "keywords": [
+            "尺码",
+            "尺寸",
+            "身高",
+            "体重",
+            "胸围",
+            "腰围",
+            "臀围",
+            "肩宽",
+            "袖长",
+            "衣长"
+        ],
+        "min_chinese_tokens": 3
+    }
+}
