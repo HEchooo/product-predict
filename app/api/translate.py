@@ -6,6 +6,7 @@ Translation API endpoints.
 
 import base64
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -20,6 +21,7 @@ from app.services.online_translate_service import (
     OnlineTranslateService,
     get_online_translate_service,
 )
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +45,10 @@ class TranslateResponse(BaseModel):
     translated: bool = Field(default=False, description="是否进行了翻译")
     # 使用的翻译服务
     service: Optional[str] = Field(default=None, description="使用的翻译服务 (aliyun/online)")
-    # 阿里云返回的是URL
-    imageUrl: Optional[str] = Field(default=None, description="翻译后图片URL (阿里云)")
-    # 在线翻译返回的是Base64
-    imageBase64: Optional[str] = Field(default=None, description="翻译后图片Base64 (在线翻译)")
+    # 翻译后图片URL
+    imageUrl: Optional[str] = Field(default=None, description="翻译后图片URL")
+    # 翻译API调用耗时(毫秒)
+    timeMs: Optional[int] = Field(default=None, description="翻译API调用耗时(毫秒)")
     # 错误信息
     message: Optional[str] = Field(default=None, description="状态消息或错误信息")
 
@@ -90,6 +92,52 @@ def is_rate_limit_error(code: int, message: str) -> bool:
             return True
     
     return False
+
+
+# 图片上传接口配置 (从环境变量读取)
+
+
+async def upload_image_to_gcp(image_base64: str, filename: str = "translated.jpg") -> Optional[str]:
+    """
+    将Base64图片上传到GCP，返回URL
+    
+    Args:
+        image_base64: 图片的Base64编码
+        filename: 文件名
+    
+    Returns:
+        上传成功返回URL，失败返回None
+    """
+    try:
+        # Base64解码为字节
+        image_bytes = base64.b64decode(image_base64)
+        
+        # 构建multipart表单
+        files = {
+            "file": (filename, image_bytes, "image/jpeg")
+        }
+        
+        # 从配置获取上传URL
+        settings = get_settings()
+        upload_url = settings.UPLOAD_IMAGE_URL
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(upload_url, files=files)
+            response.raise_for_status()
+        
+        data = response.json()
+        
+        if data.get("code") == 0 and data.get("data", {}).get("url"):
+            url = data["data"]["url"]
+            logger.info(f"图片上传成功: {url}")
+            return url
+        else:
+            logger.error(f"图片上传失败: {data}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"图片上传异常: {e}")
+        return None
 
 
 # ============================================
@@ -160,6 +208,7 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
     # Step 2: 尝试阿里云翻译
     use_online_fallback = False
     aliyun_error_message = ""
+    translate_start_time = time.time()
     
     try:
         aliyun_service = get_aliyun_translate_service()
@@ -174,12 +223,14 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
         
         if aliyun_result.success:
             # 阿里云翻译成功
-            logger.info(f"阿里云翻译成功: {aliyun_result.final_image_url}")
+            translate_time_ms = int((time.time() - translate_start_time) * 1000)
+            logger.info(f"阿里云翻译成功: {aliyun_result.final_image_url}, 耗时: {translate_time_ms}ms")
             return TranslateResponse(
                 success=True,
                 translated=True,
                 service="aliyun",
                 imageUrl=aliyun_result.final_image_url,
+                timeMs=translate_time_ms,
                 message="Translation completed via Aliyun"
             )
         else:
@@ -211,12 +262,25 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
             online_result = await online_service.translate_image_base64_async(image_base64)
             
             if online_result.success:
-                logger.info(f"在线翻译成功: translated={online_result.translated}")
+                translate_time_ms = int((time.time() - translate_start_time) * 1000)
+                logger.info(f"在线翻译成功: translated={online_result.translated}, 耗时: {translate_time_ms}ms")
+                
+                # 将Base64图片上传到GCP
+                image_url = None
+                if online_result.image_base64:
+                    image_url = await upload_image_to_gcp(
+                        online_result.image_base64,
+                        f"translated_{int(time.time())}.jpg"
+                    )
+                    if not image_url:
+                        logger.warning("图片上传失败，但翻译已成功")
+                
                 return TranslateResponse(
                     success=True,
                     translated=online_result.translated,
                     service="online",
-                    imageBase64=online_result.image_base64,
+                    imageUrl=image_url,
+                    timeMs=translate_time_ms,
                     message=f"Translation completed via online service (fallback from: {aliyun_error_message})"
                 )
             else:

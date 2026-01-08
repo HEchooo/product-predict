@@ -70,6 +70,9 @@ class TranslateConfig(BaseSettings):
     OUTPUT_DIR: str = "output"
     DEBUG_DIR: Optional[str] = None
     
+    # Upload API
+    UPLOAD_IMAGE_URL: str = "http://api.test-hot-product.echooo.link/api/v1/video/upload-image"
+    
     @field_validator("GCP_PROJECT", mode="before")
     @classmethod
     def validate_gcp_project(cls, v: Optional[str]) -> Optional[str]:
