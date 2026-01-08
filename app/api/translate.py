@@ -178,13 +178,15 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
     # Step 1: 下载图片并转换为Base64
     try:
         logger.info(f"下载图片: {img_url}")
+        download_start_time = time.time()
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(img_url)
             response.raise_for_status()
             image_bytes = response.content
         
+        download_time_ms = int((time.time() - download_start_time) * 1000)
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-        logger.info(f"图片下载成功，大小: {len(image_bytes)} bytes")
+        logger.info(f"图片下载成功，大小: {len(image_bytes)} bytes, 下载耗时: {download_time_ms}ms")
         
     except httpx.TimeoutException:
         logger.error(f"下载图片超时: {img_url}")
@@ -259,21 +261,27 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
             online_service = get_online_translate_service()
             
             logger.info("降级到在线翻译服务")
+            # 重新计时，只记录online翻译的时间
+            online_start_time = time.time()
             online_result = await online_service.translate_image_base64_async(image_base64)
             
             if online_result.success:
-                translate_time_ms = int((time.time() - translate_start_time) * 1000)
-                logger.info(f"在线翻译成功: translated={online_result.translated}, 耗时: {translate_time_ms}ms")
+                translate_time_ms = int((time.time() - online_start_time) * 1000)
+                logger.info(f"在线翻译成功: translated={online_result.translated}, 翻译耗时: {translate_time_ms}ms")
                 
                 # 将Base64图片上传到GCP
                 image_url = None
                 if online_result.image_base64:
+                    upload_start_time = time.time()
                     image_url = await upload_image_to_gcp(
                         online_result.image_base64,
                         f"translated_{int(time.time())}.jpg"
                     )
-                    if not image_url:
-                        logger.warning("图片上传失败，但翻译已成功")
+                    upload_time_ms = int((time.time() - upload_start_time) * 1000)
+                    if image_url:
+                        logger.info(f"图片上传成功, 上传耗时: {upload_time_ms}ms")
+                    else:
+                        logger.warning(f"图片上传失败，但翻译已成功, 上传耗时: {upload_time_ms}ms")
                 
                 return TranslateResponse(
                     success=True,
