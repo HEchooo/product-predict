@@ -16,6 +16,7 @@ dependencies = [
     "google-genai>=1.0.0",
     "simple-lama-inpainting>=0.1.0",
     "httpx>=0.28.0",
+    "alibabacloud-alimt20181012>=1.5.2",
 ]
 
 [project.scripts]

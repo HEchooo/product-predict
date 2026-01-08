@@ -2,12 +2,23 @@
 FastAPI application entry point for image translation service.
 """
 
+# 在最开始加载 .env 文件，确保所有服务能读取环境变量
+from dotenv import load_dotenv
+load_dotenv()
+
+import logging
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.translate import router as translate_router
 from app.config import get_settings
+
+# 配置日志级别
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 
 def create_app() -> FastAPI:

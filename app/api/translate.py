@@ -1,136 +1,241 @@
 """
 Translation API endpoints.
+
+使用阿里云翻译服务作为主要翻译方案，当阿里云限流时降级到在线翻译服务。
 """
 
-from typing import Annotated
+import base64
+import logging
+from typing import Optional
 
-from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Depends
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
-from app.models.translate import (
-    TranslateOptions,
-    TranslateUrlRequest,
-    TranslateResponse,
-    TranslateResultData,
-    HealthResponse,
+from app.services.aliyun_translate_service import (
+    AliyunTranslateService,
+    get_aliyun_translate_service,
 )
-from app.services.translate_service import TranslateService, get_translate_service
+from app.services.online_translate_service import (
+    OnlineTranslateService,
+    get_online_translate_service,
+)
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+# ============================================
+# 请求/响应模型
+# ============================================
+
+class TranslateRequest(BaseModel):
+    """翻译请求"""
+    imgUrl: str = Field(..., description="图片URL")
+    sourceLanguage: str = Field(default="zh", description="源语言")
+    targetLanguage: str = Field(default="en", description="目标语言")
+
+
+class TranslateResponse(BaseModel):
+    """翻译响应"""
+    success: bool = Field(description="是否成功")
+    translated: bool = Field(default=False, description="是否进行了翻译")
+    # 使用的翻译服务
+    service: Optional[str] = Field(default=None, description="使用的翻译服务 (aliyun/online)")
+    # 阿里云返回的是URL
+    imageUrl: Optional[str] = Field(default=None, description="翻译后图片URL (阿里云)")
+    # 在线翻译返回的是Base64
+    imageBase64: Optional[str] = Field(default=None, description="翻译后图片Base64 (在线翻译)")
+    # 错误信息
+    message: Optional[str] = Field(default=None, description="状态消息或错误信息")
+
+
+class HealthResponse(BaseModel):
+    """健康检查响应"""
+    status: str = Field(default="ok")
+    version: str = Field(default="0.2.0")
+
+
+# ============================================
+# 阿里云限流错误码
+# ============================================
+
+# 阿里云常见限流/配额错误码
+ALIYUN_RATE_LIMIT_CODES = {
+    10001,  # 限流错误
+    10002,  # 配额超限
+    429,    # Too Many Requests
+}
+
+# 需要降级到在线翻译的错误关键词
+RATE_LIMIT_KEYWORDS = [
+    "限流",
+    "rate limit",
+    "throttl",
+    "quota",
+    "too many",
+    "frequency",
+]
+
+
+def is_rate_limit_error(code: int, message: str) -> bool:
+    """判断是否为限流错误"""
+    if code in ALIYUN_RATE_LIMIT_CODES:
+        return True
+    
+    message_lower = message.lower()
+    for keyword in RATE_LIMIT_KEYWORDS:
+        if keyword.lower() in message_lower:
+            return True
+    
+    return False
+
+
+# ============================================
+# API 端点
+# ============================================
+
 @router.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check() -> HealthResponse:
     """
-    Health check endpoint.
-    Returns service status and version.
+    健康检查端点。
+    返回服务状态和版本。
     """
-    return HealthResponse(status="ok", version="0.1.0")
+    return HealthResponse(status="ok", version="0.2.0")
 
 
 @router.post(
     "/api/v1/translate",
     response_model=TranslateResponse,
     tags=["Translation"],
-    summary="Translate image (multipart upload)",
-    description="Upload an image containing Chinese text and get the translated version with English text."
+    summary="翻译图片",
+    description="提供图片URL，翻译图片中的文字。优先使用阿里云翻译，限流时降级到在线翻译。"
 )
-async def translate_image(
-    file: Annotated[UploadFile, File(description="Image file to translate")],
-    ocr_backend: Annotated[str, Form()] = "rapid",
-    inpaint_backend: Annotated[str, Form()] = "lama",
-    gate_mode: Annotated[str, Form()] = "auto",
-    min_font_px: Annotated[int, Form()] = 10,
-    max_font_px: Annotated[int, Form()] = 64,
-    allow_extra_line: Annotated[bool, Form()] = True,
-    max_extra_lines: Annotated[int, Form()] = 1,
-    return_base64: Annotated[bool, Form()] = True,
-    service: TranslateService = Depends(get_translate_service),
-) -> TranslateResponse:
+async def translate_image(request: TranslateRequest) -> TranslateResponse:
     """
-    Translate Chinese text in an uploaded image to English.
+    翻译图片中的文字。
     
-    The image is processed through:
-    1. OCR to detect Chinese text
-    2. Inpainting to remove original text
-    3. Translation via Gemini
-    4. Rendering English text in the same style/position
+    处理流程:
+    1. 从URL下载图片并转换为Base64
+    2. 尝试使用阿里云翻译服务
+    3. 如果阿里云限流，降级到在线翻译服务
     
-    Returns the processed image as base64 (if return_base64=true).
+    阿里云返回翻译后的图片URL，在线翻译返回Base64。
     """
-    # Validate file type
-    if file.content_type and not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type: {file.content_type}. Expected image/*"
+    img_url = request.imgUrl
+    source_lang = request.sourceLanguage
+    target_lang = request.targetLanguage
+    
+    # Step 1: 下载图片并转换为Base64
+    try:
+        logger.info(f"下载图片: {img_url}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(img_url)
+            response.raise_for_status()
+            image_bytes = response.content
+        
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        logger.info(f"图片下载成功，大小: {len(image_bytes)} bytes")
+        
+    except httpx.TimeoutException:
+        logger.error(f"下载图片超时: {img_url}")
+        return TranslateResponse(
+            success=False,
+            message=f"下载图片超时: {img_url}"
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"下载图片HTTP错误: {e.response.status_code}")
+        return TranslateResponse(
+            success=False,
+            message=f"下载图片失败: HTTP {e.response.status_code}"
+        )
+    except Exception as e:
+        logger.error(f"下载图片失败: {e}")
+        return TranslateResponse(
+            success=False,
+            message=f"下载图片失败: {str(e)}"
         )
     
-    # Build options
-    options = TranslateOptions(
-        ocr_backend=ocr_backend,  # type: ignore
-        inpaint_backend=inpaint_backend,  # type: ignore
-        gate_mode=gate_mode,  # type: ignore
-        min_font_px=min_font_px,
-        max_font_px=max_font_px,
-        allow_extra_line=allow_extra_line,
-        max_extra_lines=max_extra_lines,
-        return_base64=return_base64,
+    # Step 2: 尝试阿里云翻译
+    use_online_fallback = False
+    aliyun_error_message = ""
+    
+    try:
+        aliyun_service = get_aliyun_translate_service()
+        
+        logger.info(f"调用阿里云翻译: {source_lang} -> {target_lang}")
+        aliyun_result = aliyun_service.translate_image_base64(
+            image_base64=image_base64,
+            source_language=source_lang,
+            target_language=target_lang,
+            field="e-commerce",  # 使用电商领域
+        )
+        
+        if aliyun_result.success:
+            # 阿里云翻译成功
+            logger.info(f"阿里云翻译成功: {aliyun_result.final_image_url}")
+            return TranslateResponse(
+                success=True,
+                translated=True,
+                service="aliyun",
+                imageUrl=aliyun_result.final_image_url,
+                message="Translation completed via Aliyun"
+            )
+        else:
+            # 阿里云翻译失败，降级到在线翻译
+            if is_rate_limit_error(aliyun_result.code, aliyun_result.message):
+                logger.warning(f"阿里云限流，准备降级: code={aliyun_result.code}, message={aliyun_result.message}")
+            else:
+                logger.warning(f"阿里云翻译失败，准备降级: code={aliyun_result.code}, message={aliyun_result.message}")
+            use_online_fallback = True
+            aliyun_error_message = aliyun_result.message
+    
+    except ValueError as e:
+        # 阿里云配置错误（如未设置AccessKey），直接使用在线翻译
+        logger.warning(f"阿里云服务未配置: {e}")
+        use_online_fallback = True
+        aliyun_error_message = str(e)
+    except Exception as e:
+        # 其他异常，尝试降级
+        logger.error(f"阿里云翻译异常: {e}")
+        use_online_fallback = True
+        aliyun_error_message = str(e)
+    
+    # Step 3: 降级到在线翻译
+    if use_online_fallback:
+        try:
+            online_service = get_online_translate_service()
+            
+            logger.info("降级到在线翻译服务")
+            online_result = await online_service.translate_image_base64_async(image_base64)
+            
+            if online_result.success:
+                logger.info(f"在线翻译成功: translated={online_result.translated}")
+                return TranslateResponse(
+                    success=True,
+                    translated=online_result.translated,
+                    service="online",
+                    imageBase64=online_result.image_base64,
+                    message=f"Translation completed via online service (fallback from: {aliyun_error_message})"
+                )
+            else:
+                logger.error(f"在线翻译也失败: {online_result.message}")
+                return TranslateResponse(
+                    success=False,
+                    service="online",
+                    message=f"在线翻译失败: {online_result.message} (阿里云错误: {aliyun_error_message})"
+                )
+        
+        except Exception as e:
+            logger.error(f"在线翻译异常: {e}")
+            return TranslateResponse(
+                success=False,
+                message=f"翻译服务均失败。阿里云: {aliyun_error_message}; 在线: {str(e)}"
+            )
+    
+    # 不应该到达这里
+    return TranslateResponse(
+        success=False,
+        message="未知错误"
     )
-    
-    try:
-        # Read image bytes
-        image_bytes = await file.read()
-        
-        # Process translation
-        result = service.translate_image(
-            image_bytes=image_bytes,
-            options=options,
-            filename=file.filename
-        )
-        
-        return TranslateResponse(success=True, data=result)
-        
-    except Exception as e:
-        return TranslateResponse(
-            success=False,
-            error=str(e),
-            data=TranslateResultData(
-                status="error",
-                reason=str(e)
-            )
-        )
-
-
-@router.post(
-    "/api/v1/translate/url",
-    response_model=TranslateResponse,
-    tags=["Translation"],
-    summary="Translate image from URL",
-    description="Provide an image URL containing Chinese text and get the translated version."
-)
-async def translate_image_from_url(
-    request: TranslateUrlRequest,
-    service: TranslateService = Depends(get_translate_service),
-) -> TranslateResponse:
-    """
-    Translate Chinese text in an image from URL to English.
-    
-    Downloads the image from the provided URL and processes it.
-    """
-    try:
-        result = await service.translate_image_from_url(
-            image_url=request.image_url,
-            options=request.options
-        )
-        
-        return TranslateResponse(success=True, data=result)
-        
-    except Exception as e:
-        return TranslateResponse(
-            success=False,
-            error=str(e),
-            data=TranslateResultData(
-                status="error",
-                reason=str(e)
-            )
-        )
