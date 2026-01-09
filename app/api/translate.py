@@ -4,6 +4,7 @@ Translation API endpoints.
 使用阿里云翻译服务作为主要翻译方案，当阿里云限流时降级到在线翻译服务。
 """
 
+import asyncio
 import base64
 import logging
 import time
@@ -255,56 +256,68 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
         use_online_fallback = True
         aliyun_error_message = str(e)
     
-    # Step 3: 降级到在线翻译
+    # Step 3: 降级到在线翻译 (带重试机制)
     if use_online_fallback:
-        try:
-            online_service = get_online_translate_service()
-            
-            logger.info("降级到在线翻译服务")
-            # 重新计时，只记录online翻译的时间
-            online_start_time = time.time()
-            online_result = await online_service.translate_image_base64_async(image_base64)
-            
-            if online_result.success:
-                translate_time_ms = int((time.time() - online_start_time) * 1000)
-                logger.info(f"在线翻译成功: translated={online_result.translated}, 翻译耗时: {translate_time_ms}ms")
-                
-                # 将Base64图片上传到GCP
-                image_url = None
-                if online_result.image_base64:
-                    upload_start_time = time.time()
-                    image_url = await upload_image_to_gcp(
-                        online_result.image_base64,
-                        f"translated_{int(time.time())}.jpg"
-                    )
-                    upload_time_ms = int((time.time() - upload_start_time) * 1000)
-                    if image_url:
-                        logger.info(f"图片上传成功, 上传耗时: {upload_time_ms}ms")
-                    else:
-                        logger.warning(f"图片上传失败，但翻译已成功, 上传耗时: {upload_time_ms}ms")
-                
-                return TranslateResponse(
-                    success=True,
-                    translated=online_result.translated,
-                    service="online",
-                    imageUrl=image_url,
-                    timeMs=translate_time_ms,
-                    message=f"Translation completed via online service (fallback from: {aliyun_error_message})"
-                )
-            else:
-                logger.error(f"在线翻译也失败: {online_result.message}")
-                return TranslateResponse(
-                    success=False,
-                    service="online",
-                    message=f"在线翻译失败: {online_result.message} (阿里云错误: {aliyun_error_message})"
-                )
+        online_service = get_online_translate_service()
+        max_retries = 3
+        last_error = ""
         
-        except Exception as e:
-            logger.error(f"在线翻译异常: {e}")
-            return TranslateResponse(
-                success=False,
-                message=f"翻译服务均失败。阿里云: {aliyun_error_message}; 在线: {str(e)}"
-            )
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"调用在线翻译服务 (尝试 {attempt}/{max_retries})")
+                # 重新计时，只记录online翻译的时间
+                online_start_time = time.time()
+                online_result = await online_service.translate_image_base64_async(image_base64)
+                
+                if online_result.success:
+                    translate_time_ms = int((time.time() - online_start_time) * 1000)
+                    logger.info(f"在线翻译成功: translated={online_result.translated}, 翻译耗时: {translate_time_ms}ms")
+                    
+                    # 将Base64图片上传到GCP
+                    image_url = None
+                    if online_result.image_base64:
+                        upload_start_time = time.time()
+                        image_url = await upload_image_to_gcp(
+                            online_result.image_base64,
+                            f"translated_{int(time.time())}.jpg"
+                        )
+                        upload_time_ms = int((time.time() - upload_start_time) * 1000)
+                        if image_url:
+                            logger.info(f"图片上传成功, 上传耗时: {upload_time_ms}ms")
+                        else:
+                            logger.warning(f"图片上传失败，但翻译已成功, 上传耗时: {upload_time_ms}ms")
+                    
+                    return TranslateResponse(
+                        success=True,
+                        translated=online_result.translated,
+                        service="online",
+                        imageUrl=image_url,
+                        timeMs=translate_time_ms,
+                        message=f"Translation completed via online service (fallback from: {aliyun_error_message})"
+                    )
+                else:
+                    # 翻译返回失败，记录错误并重试
+                    last_error = online_result.message
+                    logger.warning(f"在线翻译失败 (尝试 {attempt}/{max_retries}): {last_error}")
+                    if attempt < max_retries:
+                        # 等待一小段时间后重试
+                        await asyncio.sleep(1)
+                        continue
+            
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"在线翻译异常 (尝试 {attempt}/{max_retries}): {last_error}")
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    continue
+        
+        # 所有重试都失败
+        logger.error(f"在线翻译服务重试{max_retries}次后仍失败")
+        return TranslateResponse(
+            success=False,
+            service="online",
+            message=f"在线翻译服务重试{max_retries}次后失败: {last_error} (阿里云错误: {aliyun_error_message})"
+        )
     
     # 不应该到达这里
     return TranslateResponse(
