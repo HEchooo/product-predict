@@ -339,7 +339,8 @@ class AliyunTranslateService:
             
             logger.info(
                 f"调用阿里云图片翻译API: {source_language} -> {target_language}, "
-                f"领域: {field}, URL: {image_url is not None}"
+                f"领域: {field}, URL: {image_url is not None}, "
+                f"region_id: {self.region_id}, endpoint: {self.endpoint}"
             )
             
             # 调用API
