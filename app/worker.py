@@ -257,9 +257,8 @@ class BackgroundWorker:
                     else:
                         mime_type = "image/jpeg"  # 默认 jpeg
                 
-                # 生成带前缀的 base64 (用于阿里云 API)
-                raw_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                image_base64 = f"data:{mime_type};base64,{raw_base64}"
+                # 生成 base64 (纯字符串，用于在线翻译 API)
+                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
                 
                 logger.info(f"[任务 {task_id}] 下载图片成功: {len(image_bytes)} bytes, {download_time}ms, 格式: {mime_type}")
                 break
