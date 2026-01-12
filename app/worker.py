@@ -207,30 +207,52 @@ class BackgroundWorker:
         else:
             callback_url = settings.CALLBACK_URL_TEST
         
-        logger.info(f"[Task {task_id}] Processing: {img_url}, callback={enable_callback}, env={callback_env}")
+        logger.info(f"[任务 {task_id}] 开始处理: {img_url}, callback={enable_callback}, env={callback_env}")
         
-        try:
-            # Step 1: Download image
-            download_start = time.time()
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(img_url)
-                response.raise_for_status()
-                image_bytes = response.content
-            
-            download_time = int((time.time() - download_start) * 1000)
-            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-            logger.info(f"[Task {task_id}] Downloaded image: {len(image_bytes)} bytes, {download_time}ms")
-            
-        except Exception as e:
-            logger.error(f"[Task {task_id}] Failed to download image: {e}")
-            await TaskService.fail_task(task_id, f"下载图片失败: {str(e)}")
+        # 下载请求头 (模拟浏览器)
+        download_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.taobao.com/",
+        }
+        
+        # Step 1: 下载图片 (带重试)
+        image_bytes = None
+        download_max_retries = 3
+        last_download_error = ""
+        
+        for attempt in range(1, download_max_retries + 1):
+            try:
+                download_start = time.time()
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(img_url, headers=download_headers)
+                    response.raise_for_status()
+                    image_bytes = response.content
+                
+                download_time = int((time.time() - download_start) * 1000)
+                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                logger.info(f"[任务 {task_id}] 下载图片成功: {len(image_bytes)} bytes, {download_time}ms")
+                break
+                
+            except Exception as e:
+                last_download_error = str(e)
+                logger.warning(f"[任务 {task_id}] 下载图片失败 (尝试 {attempt}/{download_max_retries}): {e}")
+                if attempt < download_max_retries:
+                    await asyncio.sleep(1 * attempt)  # 递增等待
+        
+        # 检查下载是否成功
+        if image_bytes is None:
+            error_msg = f"下载图片失败 (重试{download_max_retries}次): {last_download_error}"
+            logger.error(f"[任务 {task_id}] {error_msg}")
+            await TaskService.fail_task(task_id, error_msg)
             # 发送回调
             if enable_callback and callback_url:
                 await send_callback(
                     callback_url=callback_url,
                     task_id=task_id,
                     status=TaskStatus.FAILED,
-                    error_message=f"下载图片失败: {str(e)}",
+                    error_message=error_msg,
                 )
             return
         
