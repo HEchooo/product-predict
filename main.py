@@ -56,25 +56,26 @@ def create_app() -> FastAPI:
         import logging
         logger = logging.getLogger(__name__)
         
-        # Initialize database
+        # Initialize database (optional - sync translate API works without it)
+        db_initialized = False
         try:
             logger.info("Initializing database...")
             from app.database import init_db
             init_db()
             logger.info("Database initialized successfully")
+            db_initialized = True
         except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            raise
+            logger.warning(f"Failed to initialize database (async tasks disabled): {e}")
         
-        # Start background worker
-        try:
-            logger.info("Starting background worker...")
-            from app.worker import start_worker
-            await start_worker()
-            logger.info("Background worker started")
-        except Exception as e:
-            logger.error(f"Failed to start worker: {e}")
-            raise
+        # Start background worker (only if database is available)
+        if db_initialized:
+            try:
+                logger.info("Starting background worker...")
+                from app.worker import start_worker
+                await start_worker()
+                logger.info("Background worker started")
+            except Exception as e:
+                logger.warning(f"Failed to start worker (async tasks disabled): {e}")
         
         # Pre-warm translation services (optional, for sync translate)
         try:

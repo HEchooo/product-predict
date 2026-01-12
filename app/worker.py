@@ -46,6 +46,10 @@ async def send_callback(
         "status": status,
     }
     
+    # 打印请求地址和参数
+    logger.info(f"[Task {task_id}] Sending callback to: {callback_url}")
+    logger.info(f"[Task {task_id}] Callback payload: {payload}")
+    
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(callback_url, json=payload)
