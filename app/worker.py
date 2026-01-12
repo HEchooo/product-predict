@@ -231,8 +231,37 @@ class BackgroundWorker:
                     image_bytes = response.content
                 
                 download_time = int((time.time() - download_start) * 1000)
-                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                logger.info(f"[任务 {task_id}] 下载图片成功: {len(image_bytes)} bytes, {download_time}ms")
+                
+                # 检测图片格式
+                content_type = response.headers.get("content-type", "")
+                if "jpeg" in content_type or "jpg" in content_type:
+                    mime_type = "image/jpeg"
+                elif "png" in content_type:
+                    mime_type = "image/png"
+                elif "gif" in content_type:
+                    mime_type = "image/gif"
+                elif "webp" in content_type:
+                    mime_type = "image/webp"
+                elif "bmp" in content_type:
+                    mime_type = "image/bmp"
+                else:
+                    # 通过文件头检测
+                    if image_bytes[:3] == b'\xff\xd8\xff':
+                        mime_type = "image/jpeg"
+                    elif image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+                        mime_type = "image/png"
+                    elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+                        mime_type = "image/gif"
+                    elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+                        mime_type = "image/webp"
+                    else:
+                        mime_type = "image/jpeg"  # 默认 jpeg
+                
+                # 生成带前缀的 base64 (用于阿里云 API)
+                raw_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                image_base64 = f"data:{mime_type};base64,{raw_base64}"
+                
+                logger.info(f"[任务 {task_id}] 下载图片成功: {len(image_bytes)} bytes, {download_time}ms, 格式: {mime_type}")
                 break
                 
             except Exception as e:
@@ -266,8 +295,9 @@ class BackgroundWorker:
             aliyun_service = get_aliyun_translate_service()
             translate_start = time.time()
             
-            aliyun_result = aliyun_service.translate_image_base64(
-                image_base64=image_base64,
+            # 使用 URL 方式调用阿里云 (避免 base64 扩展名识别问题)
+            aliyun_result = aliyun_service.translate_image_url(
+                image_url=img_url,
                 source_language=source_language,
                 target_language=target_language,
                 field="e-commerce",
@@ -327,15 +357,36 @@ class BackgroundWorker:
                     if online_result.success:
                         translate_time_ms = int((time.time() - online_start) * 1000)
                         translate_source = "online"
-                        logger.info(f"[Task {task_id}] Online success, {translate_time_ms}ms")
+                        
+                        # 检查是否真的有翻译结果
+                        if not online_result.image_base64:
+                            # 没有翻译结果 (可能图片没有中文，translated=False)
+                            logger.info(f"[任务 {task_id}] 在线翻译返回成功但无翻译图片, 返回原图")
+                            # 返回原图 URL 作为结果
+                            await TaskService.complete_task(
+                                task_id=task_id,
+                                result_url=img_url,  # 返回原图
+                                translate_source="none",  # 标记为未翻译
+                                translate_time_ms=translate_time_ms,
+                            )
+                            # 发送回调
+                            if enable_callback and callback_url:
+                                await send_callback(
+                                    callback_url=callback_url,
+                                    task_id=task_id,
+                                    status=TaskStatus.SUCCESS,
+                                    result_url=img_url,
+                                    translate_source="none",
+                                )
+                            return
+                        
+                        logger.info(f"[任务 {task_id}] 在线翻译成功, {translate_time_ms}ms")
                         
                         # Upload to GCP
-                        result_url = None
-                        if online_result.image_base64:
-                            result_url = await upload_image_to_gcp(
-                                online_result.image_base64,
-                                f"translated_{task_id}.jpg"
-                            )
+                        result_url = await upload_image_to_gcp(
+                            online_result.image_base64,
+                            f"translated_{task_id}.jpg"
+                        )
                         
                         if result_url:
                             await TaskService.complete_task(
@@ -356,7 +407,7 @@ class BackgroundWorker:
                             return
                         else:
                             # Upload failed but translation succeeded
-                            error_msg = "翻译成功但图片上传失败"
+                            error_msg = "翻译成功但图片上传GCP失败"
                             await TaskService.fail_task(
                                 task_id=task_id,
                                 error_message=error_msg,
@@ -374,7 +425,7 @@ class BackgroundWorker:
                             return
                     else:
                         last_error = online_result.message
-                        logger.warning(f"[Task {task_id}] Online failed: {last_error}")
+                        logger.warning(f"[任务 {task_id}] 在线翻译失败: {last_error}")
                         if attempt < max_retries:
                             await asyncio.sleep(1)
                             
