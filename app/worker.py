@@ -47,17 +47,20 @@ async def send_callback(
     }
     
     # 打印请求地址和参数
-    logger.info(f"[Task {task_id}] Sending callback to: {callback_url}")
-    logger.info(f"[Task {task_id}] Callback payload: {payload}")
+    logger.info(f"[任务 {task_id}] 发送回调请求: {callback_url}")
+    logger.info(f"[任务 {task_id}] 回调参数: {payload}")
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(callback_url, json=payload)
             response.raise_for_status()
-        logger.info(f"[Task {task_id}] Callback sent successfully to {callback_url}")
+            
+        # 打印响应
+        logger.info(f"[任务 {task_id}] 回调成功, 状态码: {response.status_code}")
+        logger.info(f"[任务 {task_id}] 回调响应: {response.text}")
         return True
     except Exception as e:
-        logger.error(f"[Task {task_id}] Callback failed: {e}")
+        logger.error(f"[任务 {task_id}] 回调失败: {e}")
         return False
 
 
