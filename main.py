@@ -13,12 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.translate import router as translate_router
 from app.config import get_settings
+from app.logging_config import setup_logging
 
-# 配置日志级别
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# 初始化日志系统 (按天切割，存放到 logs 目录)
+setup_logging(log_dir="logs", log_level="INFO")
 
 
 def create_app() -> FastAPI:
