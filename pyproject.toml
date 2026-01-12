@@ -17,6 +17,10 @@ dependencies = [
     "simple-lama-inpainting>=0.1.0",
     "httpx>=0.28.0",
     "alibabacloud-alimt20181012>=1.5.2",
+    "sqlalchemy>=2.0.0",
+    "aiomysql>=0.2.0",
+    "pymysql>=1.1.0",
+    "greenlet>=3.0.0",
 ]
 
 [project.scripts]

@@ -73,6 +73,21 @@ class TranslateConfig(BaseSettings):
     # Upload API
     UPLOAD_IMAGE_URL: str = "http://api.test-hot-product.echooo.link/api/v1/video/upload-image"
     
+    # MySQL Configuration
+    MYSQL_HOST: str = "127.0.0.1"
+    MYSQL_PORT: int = 3306
+    MYSQL_USER: str = "root"
+    MYSQL_PASSWORD: str = "root"
+    MYSQL_DATABASE: str = "translate_db"
+    
+    # Worker Configuration
+    WORKER_CONCURRENCY: int = 3
+    WORKER_POLL_INTERVAL: float = 2.0  # seconds
+    
+    # Callback Configuration
+    CALLBACK_URL_TEST: Optional[str] = None  # 测试环境回调URL
+    CALLBACK_URL_PROD: Optional[str] = None  # 生产环境回调URL
+    
     @field_validator("GCP_PROJECT", mode="before")
     @classmethod
     def validate_gcp_project(cls, v: Optional[str]) -> Optional[str]:

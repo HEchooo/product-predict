@@ -324,3 +324,113 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
         success=False,
         message="未知错误"
     )
+
+
+# ============================================
+# 异步任务 API
+# ============================================
+
+class AsyncTranslateRequest(BaseModel):
+    """异步翻译请求"""
+    imgUrl: str = Field(..., description="图片URL")
+    sourceLanguage: str = Field(default="zh", description="源语言")
+    targetLanguage: str = Field(default="en", description="目标语言")
+    enableCallback: bool = Field(default=False, description="是否启用回调")
+    callbackEnv: Optional[str] = Field(default="test", description="回调环境: test 或 prod")
+
+
+class AsyncTranslateResponse(BaseModel):
+    """异步翻译响应"""
+    success: bool = Field(description="是否成功提交")
+    taskId: Optional[str] = Field(default=None, description="任务ID")
+    message: Optional[str] = Field(default=None, description="消息")
+
+
+class TaskStatusResponse(BaseModel):
+    """任务状态响应"""
+    taskId: Optional[str] = Field(default=None, description="任务ID")
+    taskResult: Optional[str] = Field(default=None, description="翻译后图片URL")
+    translateSource: Optional[str] = Field(default=None, description="翻译来源 aliyun/online")
+    errorMessage: Optional[str] = Field(default=None, description="错误信息")
+    status: Optional[str] = Field(default=None, description="任务状态 PENDING/PROCESSING/SUCCESS/FAILED")
+
+
+@router.post(
+    "/api/v1/translate/submit",
+    response_model=AsyncTranslateResponse,
+    tags=["Translation"],
+    summary="提交异步翻译任务",
+    description="提交图片翻译任务，立即返回任务ID，后台异步处理。"
+)
+async def submit_async_translate(request: AsyncTranslateRequest) -> AsyncTranslateResponse:
+    """
+    提交异步翻译任务。
+    
+    立即返回任务ID，客户端可通过 /api/v1/translate/task/{task_id} 查询结果。
+    """
+    from app.services.task_service import TaskService
+    
+    try:
+        task = await TaskService.create_task(
+            img_url=request.imgUrl,
+            source_language=request.sourceLanguage,
+            target_language=request.targetLanguage,
+            enable_callback=request.enableCallback,
+            callback_env=request.callbackEnv,
+        )
+        
+        logger.info(f"Created async task: {task.task_id}")
+        return AsyncTranslateResponse(
+            success=True,
+            taskId=task.task_id,
+            message="Task submitted successfully"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to create task: {e}")
+        return AsyncTranslateResponse(
+            success=False,
+            message=f"Failed to create task: {str(e)}"
+        )
+
+
+@router.get(
+    "/api/v1/translate/task/{taskId}",
+    response_model=TaskStatusResponse,
+    tags=["Translation"],
+    summary="查询翻译任务状态",
+    description="根据任务ID查询翻译任务的状态和结果。"
+)
+async def get_task_status(taskId: str) -> TaskStatusResponse:
+    """
+    查询翻译任务状态。
+    
+    返回任务的当前状态、翻译结果或错误信息。
+    """
+    from app.services.task_service import TaskService
+    
+    try:
+        task = await TaskService.get_task(taskId)
+        
+        if not task:
+            return TaskStatusResponse(
+                taskId=taskId,
+                status="NOT_FOUND",
+                errorMessage=f"Task not found: {taskId}"
+            )
+        
+        return TaskStatusResponse(
+            taskId=task.task_id,
+            taskResult=task.result_url,
+            translateSource=task.translate_source,
+            errorMessage=task.error_message,
+            status=task.status,
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get task: {e}")
+        return TaskStatusResponse(
+            taskId=taskId,
+            status="ERROR",
+            errorMessage=f"Failed to get task: {str(e)}"
+        )

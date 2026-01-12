@@ -56,17 +56,58 @@ def create_app() -> FastAPI:
         import logging
         logger = logging.getLogger(__name__)
         
-        # Pre-warm services: initialize OCR and inpainter
+        # Initialize database
+        try:
+            logger.info("Initializing database...")
+            from app.database import init_db
+            init_db()
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            raise
+        
+        # Start background worker
+        try:
+            logger.info("Starting background worker...")
+            from app.worker import start_worker
+            await start_worker()
+            logger.info("Background worker started")
+        except Exception as e:
+            logger.error(f"Failed to start worker: {e}")
+            raise
+        
+        # Pre-warm translation services (optional, for sync translate)
         try:
             logger.info("Pre-loading translation services...")
             from app.services.translate_service import get_translate_service
             service = get_translate_service()
-            
-            # Trigger inpainter initialization
             service._get_inpainter(settings.DEFAULT_INPAINT_BACKEND)
             logger.info("Translation services ready.")
         except Exception as e:
             logger.warning(f"Pre-loading failed (will retry on first request): {e}")
+    
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Cleanup on shutdown."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Stop background worker
+        try:
+            logger.info("Stopping background worker...")
+            from app.worker import stop_worker
+            await stop_worker()
+            logger.info("Background worker stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping worker: {e}")
+        
+        # Close database connections
+        try:
+            from app.database import close_db
+            await close_db()
+            logger.info("Database connections closed")
+        except Exception as e:
+            logger.warning(f"Error closing database: {e}")
     
     return app
 
