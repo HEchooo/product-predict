@@ -254,13 +254,22 @@ class BackgroundWorker:
                         mime_type = "image/gif"
                     elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
                         mime_type = "image/webp"
+                    elif content_type == "image/avif" or content_type == "image/heif":
+                        mime_type = content_type
                     else:
                         mime_type = "image/jpeg"  # 默认 jpeg
                 
-                # 生成 base64 (纯字符串，用于在线翻译 API)
-                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                # AVIF/HEIF/WEBP 等格式转换为 JPEG (在线翻译服务可能不支持)
+                from app.utils.image_utils import convert_to_jpeg_base64
+                if mime_type in ("image/avif", "image/heif", "image/webp"):
+                    logger.info(f"[任务 {task_id}] 检测到 {mime_type} 格式，转换为 JPEG")
+                    image_base64, original_format = convert_to_jpeg_base64(image_bytes)
+                else:
+                    # 生成 base64 (纯字符串，用于在线翻译 API)
+                    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                    original_format = mime_type.split("/")[-1].upper()
                 
-                logger.info(f"[任务 {task_id}] 下载图片成功: {len(image_bytes)} bytes, {download_time}ms, 格式: {mime_type}")
+                logger.info(f"[任务 {task_id}] 下载图片成功: {len(image_bytes)} bytes, {download_time}ms, 格式: {original_format}")
                 break
                 
             except Exception as e:

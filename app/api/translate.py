@@ -38,6 +38,7 @@ class TranslateRequest(BaseModel):
     imgUrl: str = Field(..., description="图片URL")
     sourceLanguage: str = Field(default="zh", description="源语言")
     targetLanguage: str = Field(default="en", description="目标语言")
+    type: str = Field(default="all", description="翻译服务类型: all(自动降级)/aliyun(仅阿里云)/online(仅在线)")
 
 
 class TranslateResponse(BaseModel):
@@ -175,6 +176,7 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
     img_url = request.imgUrl
     source_lang = request.sourceLanguage
     target_lang = request.targetLanguage
+    translate_type = request.type.lower()  # all/aliyun/online
     
     # 下载请求头 (模拟浏览器)
     download_headers = {
@@ -199,8 +201,19 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
                 image_bytes = response.content
             
             download_time_ms = int((time.time() - download_start_time) * 1000)
-            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-            logger.info(f"图片下载成功，大小: {len(image_bytes)} bytes, 下载耗时: {download_time_ms}ms")
+            
+            # 检测图片格式，AVIF/HEIF/WEBP 转换为 JPEG
+            content_type = response.headers.get("content-type", "")
+            from app.utils.image_utils import convert_to_jpeg_base64
+            
+            if "avif" in content_type or "heif" in content_type or "webp" in content_type:
+                logger.info(f"检测到 {content_type} 格式，转换为 JPEG")
+                image_base64, original_format = convert_to_jpeg_base64(image_bytes)
+            else:
+                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                original_format = content_type.split("/")[-1].upper() if "/" in content_type else "UNKNOWN"
+            
+            logger.info(f"图片下载成功，大小: {len(image_bytes)} bytes, 下载耗时: {download_time_ms}ms, 格式: {original_format}")
             break
             
         except httpx.TimeoutException:
@@ -224,53 +237,86 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
             message=last_download_error
         )
     
-    # Step 2: 尝试阿里云翻译
+    # Step 2: 根据 type 参数选择翻译服务
     use_online_fallback = False
     aliyun_error_message = ""
     translate_start_time = time.time()
     
-    try:
-        aliyun_service = get_aliyun_translate_service()
-        
-        logger.info(f"调用阿里云翻译: {source_lang} -> {target_lang}")
-        aliyun_result = aliyun_service.translate_image_base64(
-            image_base64=image_base64,
-            source_language=source_lang,
-            target_language=target_lang,
-            field="e-commerce",  # 使用电商领域
-        )
-        
-        if aliyun_result.success:
-            # 阿里云翻译成功
-            translate_time_ms = int((time.time() - translate_start_time) * 1000)
-            logger.info(f"阿里云翻译成功: {aliyun_result.final_image_url}, 耗时: {translate_time_ms}ms")
-            return TranslateResponse(
-                success=True,
-                translated=True,
-                service="aliyun",
-                imageUrl=aliyun_result.final_image_url,
-                timeMs=translate_time_ms,
-                message="Translation completed via Aliyun"
-            )
-        else:
-            # 阿里云翻译失败，降级到在线翻译
-            if is_rate_limit_error(aliyun_result.code, aliyun_result.message):
-                logger.warning(f"阿里云限流，准备降级: code={aliyun_result.code}, message={aliyun_result.message}")
-            else:
-                logger.warning(f"阿里云翻译失败，准备降级: code={aliyun_result.code}, message={aliyun_result.message}")
-            use_online_fallback = True
-            aliyun_error_message = aliyun_result.message
+    # 如果指定 online，直接跳过阿里云
+    if translate_type == "online":
+        logger.info("指定使用 online 翻译服务")
+        use_online_fallback = True
+        aliyun_error_message = "User specified online only"
     
-    except ValueError as e:
-        # 阿里云配置错误（如未设置AccessKey），直接使用在线翻译
-        logger.warning(f"阿里云服务未配置: {e}")
-        use_online_fallback = True
-        aliyun_error_message = str(e)
-    except Exception as e:
-        # 其他异常，尝试降级
-        logger.error(f"阿里云翻译异常: {e}")
-        use_online_fallback = True
-        aliyun_error_message = str(e)
+    # 调用阿里云翻译 (type=all 或 type=aliyun)
+    elif translate_type in ("all", "aliyun"):
+        try:
+            aliyun_service = get_aliyun_translate_service()
+            
+            logger.info(f"调用阿里云翻译: {source_lang} -> {target_lang}")
+            # 使用 URL 方式调用阿里云 (避免 base64 扩展名识别问题)
+            aliyun_result = aliyun_service.translate_image_url(
+                image_url=img_url,
+                source_language=source_lang,
+                target_language=target_lang,
+                field="e-commerce",  # 使用电商领域
+            )
+            
+            if aliyun_result.success:
+                # 阿里云翻译成功
+                translate_time_ms = int((time.time() - translate_start_time) * 1000)
+                logger.info(f"阿里云翻译成功: {aliyun_result.final_image_url}, 耗时: {translate_time_ms}ms")
+                return TranslateResponse(
+                    success=True,
+                    translated=True,
+                    service="aliyun",
+                    imageUrl=aliyun_result.final_image_url,
+                    timeMs=translate_time_ms,
+                    message="Translation completed via Aliyun"
+                )
+            else:
+                # 阿里云翻译失败
+                if translate_type == "aliyun":
+                    # 仅使用阿里云，直接返回失败
+                    translate_time_ms = int((time.time() - translate_start_time) * 1000)
+                    logger.error(f"阿里云翻译失败 (无降级): code={aliyun_result.code}, message={aliyun_result.message}")
+                    return TranslateResponse(
+                        success=False,
+                        service="aliyun",
+                        timeMs=translate_time_ms,
+                        message=f"Aliyun failed: {aliyun_result.message}"
+                    )
+                else:
+                    # 降级到在线翻译
+                    if is_rate_limit_error(aliyun_result.code, aliyun_result.message):
+                        logger.warning(f"阿里云限流，准备降级: code={aliyun_result.code}, message={aliyun_result.message}")
+                    else:
+                        logger.warning(f"阿里云翻译失败，准备降级: code={aliyun_result.code}, message={aliyun_result.message}")
+                    use_online_fallback = True
+                    aliyun_error_message = aliyun_result.message
+        
+        except ValueError as e:
+            # 阿里云配置错误
+            if translate_type == "aliyun":
+                return TranslateResponse(
+                    success=False,
+                    service="aliyun",
+                    message=f"Aliyun not configured: {str(e)}"
+                )
+            logger.warning(f"阿里云服务未配置: {e}")
+            use_online_fallback = True
+            aliyun_error_message = str(e)
+        except Exception as e:
+            # 其他异常
+            if translate_type == "aliyun":
+                return TranslateResponse(
+                    success=False,
+                    service="aliyun",
+                    message=f"Aliyun error: {str(e)}"
+                )
+            logger.error(f"阿里云翻译异常: {e}")
+            use_online_fallback = True
+            aliyun_error_message = str(e)
     
     # Step 3: 降级到在线翻译 (带重试机制)
     if use_online_fallback:
@@ -289,19 +335,30 @@ async def translate_image(request: TranslateRequest) -> TranslateResponse:
                     translate_time_ms = int((time.time() - online_start_time) * 1000)
                     logger.info(f"在线翻译成功: translated={online_result.translated}, 翻译耗时: {translate_time_ms}ms")
                     
-                    # 将Base64图片上传到GCP
-                    image_url = None
-                    if online_result.image_base64:
-                        upload_start_time = time.time()
-                        image_url = await upload_image_to_gcp(
-                            online_result.image_base64,
-                            f"translated_{int(time.time())}.jpg"
+                    # 检查是否有翻译结果
+                    if not online_result.image_base64:
+                        # 没有翻译结果 (图片没有中文文字)
+                        logger.info(f"图片无需翻译，返回原图")
+                        return TranslateResponse(
+                            success=True,
+                            translated=False,
+                            service="none",  # 标记为未翻译
+                            imageUrl=img_url,  # 返回原图
+                            timeMs=translate_time_ms,
+                            message=f"No translation needed (fallback from: {aliyun_error_message})"
                         )
-                        upload_time_ms = int((time.time() - upload_start_time) * 1000)
-                        if image_url:
-                            logger.info(f"图片上传成功, 上传耗时: {upload_time_ms}ms")
-                        else:
-                            logger.warning(f"图片上传失败，但翻译已成功, 上传耗时: {upload_time_ms}ms")
+                    
+                    # 将Base64图片上传到GCP
+                    upload_start_time = time.time()
+                    image_url = await upload_image_to_gcp(
+                        online_result.image_base64,
+                        f"translated_{int(time.time())}.jpg"
+                    )
+                    upload_time_ms = int((time.time() - upload_start_time) * 1000)
+                    if image_url:
+                        logger.info(f"图片上传成功, 上传耗时: {upload_time_ms}ms")
+                    else:
+                        logger.warning(f"图片上传失败，但翻译已成功, 上传耗时: {upload_time_ms}ms")
                     
                     return TranslateResponse(
                         success=True,

@@ -21,6 +21,7 @@ dependencies = [
     "aiomysql>=0.2.0",
     "pymysql>=1.1.0",
     "greenlet>=3.0.0",
+    "pillow-heif>=0.16.0",  # AVIF/HEIF 格式支持
 ]
 
 [project.scripts]

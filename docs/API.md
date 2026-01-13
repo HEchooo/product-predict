@@ -20,6 +20,7 @@
 | imgUrl | string | ✅ | - | 图片URL |
 | sourceLanguage | string | ❌ | zh | 源语言 |
 | targetLanguage | string | ❌ | en | 目标语言 |
+| type | string | ❌ | all | 翻译服务类型: all(自动降级)/aliyun(仅阿里云)/online(仅在线) |
 
 ### 出参
 
@@ -27,19 +28,34 @@
 |------|------|------|
 | success | boolean | 是否成功 |
 | translated | boolean | 是否进行了翻译 |
-| service | string | 翻译服务 (aliyun/online) |
+| service | string | 翻译服务 (aliyun/online/none) |
 | imageUrl | string | 翻译后图片URL |
 | message | string | 消息/错误信息 |
 
 ### curl 示例
 
 ```bash
+# 默认模式 (阿里云优先，失败降级到在线)
+curl -X POST http://localhost:8000/api/v1/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "imgUrl": "https://example.com/image.jpg"
+  }'
+
+# 仅使用阿里云
 curl -X POST http://localhost:8000/api/v1/translate \
   -H "Content-Type: application/json" \
   -d '{
     "imgUrl": "https://example.com/image.jpg",
-    "sourceLanguage": "zh",
-    "targetLanguage": "en"
+    "type": "aliyun"
+  }'
+
+# 仅使用在线翻译
+curl -X POST http://localhost:8000/api/v1/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "imgUrl": "https://example.com/image.jpg",
+    "type": "online"
   }'
 ```
 
